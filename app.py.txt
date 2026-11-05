@@ -1,0 +1,187 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import requests
+import datetime
+from scipy.stats import poisson
+
+# ==========================================================
+# 1. ARAYÜZ VE STİL YAPILANDIRMASI (SCORELAB 2 KLONU)
+# ==========================================================
+st.set_page_config(page_title="Scorelab AI Pro", page_icon="⚽", layout="centered", initial_sidebar_state="collapsed")
+
+st.markdown("""
+    <style>
+    .main {background-color: #f8f9fa;}
+    .vip-box {
+        background-color: #fff3cd; 
+        border-left: 6px solid #ffc107; 
+        padding: 15px; 
+        border-radius: 8px; 
+        margin-top: 20px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .header-box {
+        text-align: center;
+        padding: 15px;
+        background: linear-gradient(90deg, #1cb5e0 0%, #000851 100%);
+        color: white;
+        border-radius: 10px;
+        margin-bottom: 25px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+st.markdown("<div class='header-box'><h2>⚽ Scorelab AI Pro</h2><p style='margin:0;'>Otonom Futbol Analiz & Nicel Yatırım Terminali</p></div>", unsafe_allow_html=True)
+
+# ==========================================================
+# 2. ARKA PLAN MOTORLARI (Dixon-Coles & Kelly)
+# ==========================================================
+class DixonColesMotoru:
+    def matris_uret(self, le, ld, max_g=15, rho=-0.08):
+        le, ld = float(np.clip(le, 0.15, 6.0)), float(np.clip(ld, 0.15, 6.0))
+        alt_sinir = max(-1.0 / max(le * ld, 1e-6) + 1e-5, -0.99)
+        ust_sinir = min(1.0 / max(le, 1e-6) - 1e-5, 1.0 / max(ld, 1e-6) - 1e-5, 0.99)
+        rho = float(np.clip(rho, alt_sinir, ust_sinir))
+
+        g = np.arange(max_g)
+        mat = np.outer(poisson.pmf(g, le), poisson.pmf(g, ld))
+        mat[0, 0] *= (1.0 - le * ld * rho)
+        mat[0, 1] *= (1.0 + le * rho)
+        mat[1, 0] *= (1.0 + ld * rho)
+        mat[1, 1] *= (1.0 - rho)
+        return np.clip(mat, 0.0, None) / np.sum(np.clip(mat, 0.0, None))
+
+class FinansalRiskMotoru:
+    def yatırım_miktari_hesapla(self, kasa, guvenli_faktor, p, oran):
+        b = oran - 1.0
+        if b <= 0: return 0.0, 0.0, "Geçersiz Oran"
+        tam_kelly = (p * b - (1.0 - p)) / b
+        if tam_kelly <= 0: return 0.0, 0.0, "🔴 Değer Yok (Pas)"
+        fraksiyonel_oran = tam_kelly * guvenli_faktor
+        tutar = kasa * fraksiyonel_oran
+        return round(fraksiyonel_oran * 100, 2), round(tutar, 2), "🟢 OYNA"
+
+analiz_motoru = DixonColesMotoru()
+risk_motoru = FinansalRiskMotoru()
+
+# 3. GÜVENLİ CANLI VERİ ENTEGRASYONU (API)
+@st.cache_data(ttl=3600, show_spinner=False)
+def canli_verileri_getir():
+    try:
+        # Şifreni ileride site ayarlarından gireceğiz
+        api_key = st.secrets["API_KEY"]
+    except:
+        return pd.DataFrame(), "⚠️ HATA: API Anahtarını site ayarlarından eklemediniz."
+        
+    mac_listesi = []
+    url = f"https://api.the-odds-api.com/v4/sports/soccer_epl/odds?apiKey={api_key}&regions=eu&markets=h2h&oddsFormat=decimal"
+    
+    try:
+        response = requests.get(url, timeout=12)
+        if response.status_code == 200:
+            for mac in response.json():
+                ev, dep = mac['home_team'], mac['away_team']
+                o1, ox, o2 = 0.0, 0.0, 0.0
+                for bm in mac.get('bookmakers', []):
+                    if bm['key'] in ['bet365', 'pinnacle']:
+                        oranlar = bm['markets'][0]['outcomes']
+                        for o in oranlar:
+                            if o['name'] == ev: o1 = o['price']
+                            elif o['name'] == 'Draw': ox = o['price']
+                            elif o['name'] == dep: o2 = o['price']
+                        break 
+                if o1 > 0 and ox > 0 and o2 > 0:
+                    mac_listesi.append({'Ev': ev, 'Dep': dep, 'O1': o1, 'OX': ox, 'O2': o2})
+    except:
+        pass
+        
+    return pd.DataFrame(mac_listesi), "Senkronizasyon Tamam."
+
+def xg_simulasyonu_uret():
+    # Gerçek veri tabanı bağlanana kadar sistemi test etmek için
+    return np.random.uniform(1.1, 2.7), np.random.uniform(0.7, 1.8)
+
+def gorsel_cizgi_olustur(baslik, olasilik, renk):
+    yuzde = int(olasilik * 100)
+    return f"""
+    <div style="margin-bottom: 15px;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+            <span style="font-family: sans-serif; font-weight: bold; color: #2c3e50;">{baslik}</span>
+            <span style="font-weight: bold; color: {renk};">%{yuzde}</span>
+        </div>
+        <div style="width: 100%; background-color: #ecf0f1; border-radius: 6px; height: 18px;">
+            <div style="width: {yuzde}%; background-color: {renk}; height: 18px; border-radius: 6px;"></div>
+        </div>
+    </div>
+    """
+
+# ==========================================================
+# 4. GÖRSEL ARAYÜZ (FRONTEND)
+# ==========================================================
+sekme1, sekme2 = st.tabs(["🚀 Canlı Fikstür & Tarama", "📊 Otonom Kâhin (Tek Maç)"])
+
+with sekme1:
+    st.markdown("##### The Odds API Üzerinden Gerçek Zamanlı Değer Avı")
+    if st.button("🔄 Piyasayı Senkronize Et", type="primary", use_container_width=True):
+        with st.status("Küresel bahis piyasası taranıyor...", expanded=True) as status:
+            df_canli, mesaj = canli_verileri_getir()
+            
+            if len(df_canli) > 0:
+                analiz_sonuclari = []
+                for _, mac in df_canli.iterrows():
+                    le, ld = xg_simulasyonu_uret()
+                    matris = analiz_motoru.matris_uret(le, ld)
+                    p1, px, p2 = np.sum(np.tril(matris, -1)), np.sum(np.diag(matris)), np.sum(np.triu(matris, 1))
+                    
+                    adaylar = [('MS 1', p1, mac['O1']), ('MS X', px, mac['OX']), ('MS 2', p2, mac['O2'])]
+                    tercih, prob, oran, ev = max([(a, p, o, (p * o) - 1.0) for a, p, o in adaylar], key=lambda x: x[3])
+                    
+                    if ev > 0.05:
+                        yuzde, tutar, krr = risk_motoru.yatırım_miktari_hesapla(100, 0.25, prob, oran)
+                        analiz_sonuclari.append({
+                            'Maç': f"{mac['Ev']} - {mac['Dep']}", 'Tercih': tercih, 
+                            'Şans': f"%{prob*100:.1f}", 'Kasa (Kelly)': f"%{yuzde}"
+                        })
+                
+                status.update(label="Analiz Tamamlandı!", state="complete", expanded=False)
+                if len(analiz_sonuclari) > 0:
+                    st.success("✅ Fırsatlar Bulundu!")
+                    st.dataframe(pd.DataFrame(analiz_sonuclari), hide_index=True)
+                else:
+                    st.warning("Matematiksel açıdan risk almaya değecek maç yok.")
+            else:
+                status.update(label="Bağlantı Başarısız", state="error", expanded=False)
+                st.error(mesaj)
+
+with sekme2:
+    st.markdown("##### Otonom Karşılaşma Modeli")
+    col1, col2 = st.columns(2)
+    ev_takimi = col1.text_input("Ev Sahibi Takım", value="Galatasaray")
+    dep_takimi = col2.text_input("Deplasman Takımı", value="Fenerbahce")
+    
+    if st.button("🧮 Analizi Başlat", use_container_width=True):
+        le, ld = xg_simulasyonu_uret() # Gerçek xG eklenecek
+        matris = analiz_motoru.matris_uret(le, ld)
+        p1, px, p2 = np.sum(np.tril(matris, -1)), np.sum(np.diag(matris)), np.sum(np.triu(matris, 1))
+        p25 = np.sum([matris[i,j] for i in range(15) for j in range(15) if i+j>2])
+        pkg = np.sum([matris[i,j] for i in range(1,15) for j in range(1,15)])
+        
+        st.markdown(f"<h4 style='text-align: center; color: #34495e;'>{ev_takimi} vs {dep_takimi}</h4>", unsafe_allow_html=True)
+        st.markdown(gorsel_cizgi_olustur("Ev Sahibi Kazanır", p1, "#27ae60"), unsafe_allow_html=True)
+        st.markdown(gorsel_cizgi_olustur("Beraberlik Çıkar", px, "#f39c12"), unsafe_allow_html=True)
+        st.markdown(gorsel_cizgi_olustur("Deplasman Kazanır", p2, "#c0392b"), unsafe_allow_html=True)
+        st.markdown(gorsel_cizgi_olustur("2.5 Gol Üstü", p25, "#8e44ad"), unsafe_allow_html=True)
+        st.markdown(gorsel_cizgi_olustur("Karşılıklı Gol Var", pkg, "#2980b9"), unsafe_allow_html=True)
+        
+        tahminler = {"MS 1": p1, "MS X": px, "MS 2": p2}
+        en_iyi = max(tahminler, key=tahminler.get)
+        
+        st.markdown(f"""
+        <div class="vip-box">
+            <h4 style="margin-top:0; color:#856404;">⭐ Yapay Zeka Risk Raporu</h4>
+            <b>Ana Tahmin:</b> {en_iyi}<br>
+            <b>Gol Tahmini:</b> {"2.5 ÜST" if p25 > 0.55 else "2.5 ALT"}<br>
+            <i>Kelly Kriteri: Lütfen kasa yönetiminden şaşmayın.</i>
+        </div>
+        """, unsafe_allow_html=True)
